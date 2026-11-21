@@ -1,49 +1,102 @@
-from PySide6.QtCore import Qt, QRectF
-from PySide6.QtGui import QPainter, QColor, QPen, QBrush, QLinearGradient, QFont
-from PySide6.QtWidgets import QWidget
+from __future__ import annotations
+
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
+
+try:
+    import pyqtgraph.opengl as gl
+    from pyqtgraph.opengl import MeshData
+    OPENGL_AVAILABLE = True
+    OPENGL_IMPORT_ERROR = ""
+except Exception as exc:  # Keep the rest of the app usable on unsupported graphics setups.
+    gl = None
+    MeshData = None
+    OPENGL_AVAILABLE = False
+    OPENGL_IMPORT_ERROR = str(exc)
 
 
 class CharacterPreview(QWidget):
-    """Temporary visual placeholder; will be replaced by a real 3D viewport."""
+    """Interactive OpenGL viewport for imported local 3D meshes."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setMinimumSize(500, 420)
+        self._mesh_item = None
+        self._model_path: Path | None = None
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
 
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect()
-        gradient = QLinearGradient(0, 0, 0, rect.height())
-        gradient.setColorAt(0, QColor("#202a3a"))
-        gradient.setColorAt(1, QColor("#111720"))
-        painter.fillRect(rect, QBrush(gradient))
+        if not OPENGL_AVAILABLE:
+            self._fallback = QLabel(
+                "当前环境无法初始化3D视口。\n"
+                "请确认已安装 requirements.txt 中的 pyqtgraph 与 PyOpenGL，"
+                "并更新显卡驱动。\n\n详细信息：" + OPENGL_IMPORT_ERROR
+            )
+            self._fallback.setAlignment(Qt.AlignCenter)
+            self._fallback.setWordWrap(True)
+            self._fallback.setStyleSheet(
+                "background:#111720;color:#dbe8f8;border:1px solid #35465e;"
+                "border-radius:8px;padding:24px;"
+            )
+            self._layout.addWidget(self._fallback)
+            self.view = None
+            return
 
-        painter.setPen(QPen(QColor("#35465e"), 1))
-        for x in range(0, rect.width(), 40):
-            painter.drawLine(x, 0, x, rect.height())
-        for y in range(0, rect.height(), 40):
-            painter.drawLine(0, y, rect.width(), y)
+        self.view = gl.GLViewWidget()
+        self.view.setBackgroundColor("#111720")
+        self.view.setCameraPosition(distance=5, elevation=15, azimuth=35)
+        self._layout.addWidget(self.view, 1)
 
-        cx = rect.width() / 2
-        cy = rect.height() / 2 + 35
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("#a9c5e8"))
-        painter.drawEllipse(QRectF(cx - 34, cy - 190, 68, 75))
-        painter.setBrush(QColor("#547aa8"))
-        painter.drawRoundedRect(QRectF(cx - 57, cy - 112, 114, 145), 24, 24)
-        painter.setBrush(QColor("#3f6089"))
-        painter.drawRoundedRect(QRectF(cx - 100, cy - 105, 42, 125), 18, 18)
-        painter.drawRoundedRect(QRectF(cx + 58, cy - 105, 42, 125), 18, 18)
-        painter.setBrush(QColor("#263f60"))
-        painter.drawRoundedRect(QRectF(cx - 52, cy + 28, 43, 145), 16, 16)
-        painter.drawRoundedRect(QRectF(cx + 9, cy + 28, 43, 145), 16, 16)
+        grid = gl.GLGridItem()
+        grid.setSize(4, 4)
+        grid.setSpacing(0.25, 0.25)
+        self.view.addItem(grid)
+        axis = gl.GLAxisItem()
+        axis.setSize(1.2, 1.2, 1.2)
+        self.view.addItem(axis)
 
-        painter.setPen(QColor("#dbe8f8"))
-        font = QFont()
-        font.setPointSize(11)
-        painter.setFont(font)
-        painter.drawText(18, 28, "角色预览区 · 示意模型")
-        painter.setPen(QColor("#91a5bf"))
-        painter.drawText(18, rect.height() - 18, "下一阶段：接入真实3D视口、模型旋转与GLB加载")
-        painter.end()
+        self._hint = QLabel("尚未加载模型。点击上方“导入3D模型”选择 GLB、GLTF、OBJ、STL 或 PLY 文件。")
+        self._hint.setStyleSheet("color:#aab3c2;padding:6px;")
+        self._layout.addWidget(self._hint)
+
+    @property
+    def model_path(self) -> Path | None:
+        return self._model_path
+
+    def load_mesh(self, mesh, source_path: str | Path) -> None:
+        if self.view is None:
+            raise RuntimeError("当前设备未能初始化OpenGL视口。")
+        import numpy as np
+
+        vertices = np.asarray(mesh.vertices, dtype=np.float32)
+        faces = np.asarray(mesh.faces, dtype=np.uint32)
+        if vertices.size == 0 or faces.size == 0:
+            raise ValueError("模型没有可显示的顶点或三角面。")
+
+        colors = None
+        try:
+            candidate = np.asarray(mesh.visual.vertex_colors)
+            if candidate.ndim == 2 and len(candidate) == len(vertices):
+                colors = candidate.astype(np.float32) / 255.0
+        except Exception:
+            colors = None
+
+        mesh_data = MeshData(vertexes=vertices, faces=faces, vertexColors=colors)
+        item = gl.GLMeshItem(
+            meshdata=mesh_data,
+            smooth=True,
+            shader="shaded",
+            drawFaces=True,
+            drawEdges=False,
+        )
+        if self._mesh_item is not None:
+            self.view.removeItem(self._mesh_item)
+        self._mesh_item = item
+        self.view.addItem(item)
+        self.view.setCameraPosition(distance=3.5, elevation=15, azimuth=35)
+        self._model_path = Path(source_path)
+        self._hint.setText(
+            f"已加载：{self._model_path.name}  |  顶点：{len(vertices):,}  |  三角面：{len(faces):,}\n"
+            "鼠标左键拖动：旋转；鼠标滚轮：缩放；鼠标右键拖动：平移。"
+        )
