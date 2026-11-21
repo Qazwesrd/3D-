@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from app.core.project_store import ProjectStore
 from app.core.hardware import collect_hardware_summary
 from app.core.model_loader import load_model_mesh
-from app.core.character_generator import generate_base_humanoid
+from app.core.character_generator import generate_base_humanoid, generate_humanoid_parts
 from app.widgets.viewport import CharacterPreview
 from app.services.engine_registry import EngineRegistry
 
@@ -31,6 +31,7 @@ class MainWindow(QMainWindow):
         self.engines = EngineRegistry()
         self.current_project = None
         self.current_mesh = None
+        self.current_parts = {}
         self._build_ui()
         self._refresh_projects()
         self._show_hardware()
@@ -107,6 +108,12 @@ class MainWindow(QMainWindow):
         self.gender_combo = QComboBox()
         self.gender_combo.addItems(["暂不指定", "男性", "女性", "自定义"])
         form.addRow("角色类型", self.gender_combo)
+        self.preset_combo = QComboBox()
+        self.preset_combo.addItems(["自定义", "成年男性", "成年女性", "少年", "少女", "儿童"])
+        form.addRow("体型预设", self.preset_combo)
+        preset_btn = QPushButton("应用体型预设")
+        preset_btn.clicked.connect(self._apply_preset)
+        right_layout.addWidget(preset_btn)
         self.role_desc = QLineEdit()
         self.role_desc.setPlaceholderText("例如：银白长发、蓝色眼睛、精致战甲")
         form.addRow("外观描述", self.role_desc)
@@ -122,6 +129,14 @@ class MainWindow(QMainWindow):
         self._add_spin(pform, "arm_length", "手臂长度", 0.38, 0.82, 0.58, 0.01, " m")
         self._add_spin(pform, "leg_length", "腿部长度", 0.58, 1.12, 0.88, 0.01, " m")
         right_layout.addWidget(proportions)
+        right_layout.addWidget(QLabel("可独立导出的身体部件"))
+        self.part_list = QListWidget()
+        self.part_list.setMaximumHeight(150)
+        right_layout.addWidget(self.part_list)
+        export_part_btn = QPushButton("导出选中部件")
+        export_part_btn.setObjectName("secondaryButton")
+        export_part_btn.clicked.connect(self._export_selected_part)
+        right_layout.addWidget(export_part_btn)
 
         save_btn = QPushButton("保存角色设置")
         save_btn.clicked.connect(self._save_project)
@@ -204,6 +219,7 @@ class MainWindow(QMainWindow):
         self.gender_combo.setCurrentText(self.current_project.get("character_type", "暂不指定"))
         self.role_desc.setText(self.current_project.get("description", ""))
         self._set_parameters(self.current_project.get("proportions", {}))
+        self.preset_combo.setCurrentText(self.current_project.get("body_preset", "自定义"))
         self.status_label.setText(f"当前项目：{self.current_project['name']}")
 
     def _create_project(self):
@@ -230,18 +246,37 @@ class MainWindow(QMainWindow):
         self.current_project = self.store.update_project(updated["id"], updated)
         self.status_label.setText("角色外观与人体比例已保存到本地项目。")
 
+    def _apply_preset(self):
+        presets = {
+            "成年男性": {"height":1.82,"head_scale":1.0,"shoulder_width":0.48,"waist_width":0.29,"arm_length":0.60,"leg_length":0.90},
+            "成年女性": {"height":1.68,"head_scale":1.03,"shoulder_width":0.39,"waist_width":0.30,"arm_length":0.55,"leg_length":0.84},
+            "少年": {"height":1.55,"head_scale":1.12,"shoulder_width":0.36,"waist_width":0.25,"arm_length":0.49,"leg_length":0.74},
+            "少女": {"height":1.50,"head_scale":1.16,"shoulder_width":0.33,"waist_width":0.26,"arm_length":0.47,"leg_length":0.72},
+            "儿童": {"height":1.25,"head_scale":1.28,"shoulder_width":0.30,"waist_width":0.23,"arm_length":0.40,"leg_length":0.62},
+        }
+        name = self.preset_combo.currentText()
+        if name not in presets:
+            return
+        self._set_parameters(presets[name])
+        self.status_label.setText(f"已应用{name}比例预设，可继续手动调整。")
+
     def _generate_character(self):
         try:
+            self.current_parts = generate_humanoid_parts(self._parameters())
             mesh = generate_base_humanoid(self._parameters())
             self.preview.load_mesh(mesh, "内置基础人物模型")
             self.current_mesh = mesh
+            self.part_list.clear()
+            for part_name in self.current_parts:
+                self.part_list.addItem(part_name)
             self.status_label.setText(
                 f"基础人物已生成：顶点 {len(mesh.vertices):,}，三角面 {len(mesh.faces):,}。"
-                "这是可调整比例的灰盒基础网格，尚未包含精细五官、服装、盔甲和骨骼。"
+                "已包含基础五官、耳朵、手指和脚部；仍属于程序化灰盒，未包含精细拓扑、服装、盔甲和骨骼。"
             )
             if self.current_project:
                 updated = dict(self.current_project)
                 updated["proportions"] = self._parameters()
+                updated["body_preset"] = self.preset_combo.currentText()
                 updated.setdefault("assets", {})["model"] = "generated://base-humanoid"
                 self.current_project = self.store.update_project(updated["id"], updated)
         except Exception as exc:
@@ -258,6 +293,8 @@ class MainWindow(QMainWindow):
             mesh = load_model_mesh(file_path)
             self.preview.load_mesh(mesh, file_path)
             self.current_mesh = mesh
+            self.current_parts = {}
+            self.part_list.clear()
             if self.current_project:
                 updated = dict(self.current_project)
                 updated.setdefault("assets", {})["model"] = str(Path(file_path).resolve())
@@ -285,6 +322,28 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"GLB模型已导出：{file_path}")
         except Exception as exc:
             QMessageBox.critical(self, "导出失败", f"GLB导出失败：{exc}")
+
+    def _export_selected_part(self):
+        item = self.part_list.currentItem()
+        if item is None or item.text() not in self.current_parts:
+            QMessageBox.information(self, "提示", "请先生成角色并选择一个身体部件。")
+            return
+        part_name = item.text()
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "导出身体部件", f"{part_name}.glb",
+            "GLB模型 (*.glb);;OBJ模型 (*.obj);;STL模型 (*.stl)"
+        )
+        if not file_path:
+            return
+        suffix = Path(file_path).suffix.lower()
+        if suffix not in {".glb", ".obj", ".stl"}:
+            suffix = ".glb"
+            file_path += suffix
+        try:
+            self.current_parts[part_name].export(file_path, file_type=suffix[1:])
+            self.status_label.setText(f"部件“{part_name}”已导出：{file_path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "导出失败", f"部件导出失败：{exc}")
 
     def _delete_project(self):
         if not self.current_project:
