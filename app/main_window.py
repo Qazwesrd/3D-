@@ -242,6 +242,7 @@ class MainWindow(QMainWindow):
             "character_type": self.gender_combo.currentText(),
             "description": self.role_desc.text().strip(),
             "proportions": self._parameters(),
+            "body_preset": self.preset_combo.currentText(),
         })
         self.current_project = self.store.update_project(updated["id"], updated)
         self.status_label.setText("角色外观与人体比例已保存到本地项目。")
