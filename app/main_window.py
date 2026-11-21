@@ -7,11 +7,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QLabel,
     QPushButton, QListWidget, QListWidgetItem, QComboBox, QMessageBox,
-    QSplitter, QFrame, QLineEdit, QFormLayout
+    QSplitter, QFrame, QLineEdit, QFormLayout, QFileDialog
 )
 
 from app.core.project_store import ProjectStore
 from app.core.hardware import collect_hardware_summary
+from app.core.model_loader import load_model_mesh
 from app.widgets.viewport import CharacterPreview
 from app.services.engine_registry import EngineRegistry
 
@@ -23,7 +24,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("3D动漫角色创作大师")
-        self.resize(1280, 800)
+        self.resize(1360, 850)
         self.store = ProjectStore(APP_ROOT / "data" / "projects")
         self.engines = EngineRegistry()
         self.current_project = None
@@ -60,7 +61,6 @@ class MainWindow(QMainWindow):
         self.project_list = QListWidget()
         self.project_list.currentItemChanged.connect(self._on_project_selected)
         left_layout.addWidget(self.project_list, 1)
-
         self.project_name = QLineEdit()
         self.project_name.setPlaceholderText("输入新角色名称")
         left_layout.addWidget(self.project_name)
@@ -76,12 +76,15 @@ class MainWindow(QMainWindow):
         center = QWidget()
         center_layout = QVBoxLayout(center)
         center_layout.setContentsMargins(8, 0, 8, 0)
+        toolbar = QHBoxLayout()
+        toolbar.addWidget(QLabel("3D模型视口"))
+        toolbar.addStretch()
+        import_btn = QPushButton("导入3D模型")
+        import_btn.clicked.connect(self._import_model)
+        toolbar.addWidget(import_btn)
+        center_layout.addLayout(toolbar)
         self.preview = CharacterPreview()
         center_layout.addWidget(self.preview, 1)
-        hint = QLabel("当前为预览界面起始占位。下一阶段接入真正的3D视口和GLB模型加载。")
-        hint.setObjectName("muted")
-        hint.setWordWrap(True)
-        center_layout.addWidget(hint)
         splitter.addWidget(center)
 
         right = QFrame()
@@ -108,7 +111,7 @@ class MainWindow(QMainWindow):
         self.status_label.setObjectName("muted")
         right_layout.addWidget(self.status_label)
         splitter.addWidget(right)
-        splitter.setSizes([230, 780, 270])
+        splitter.setSizes([230, 850, 280])
 
         self.setStyleSheet("""
             QMainWindow, QWidget { background: #171a21; color: #edf0f6; font-size: 14px; }
@@ -184,6 +187,29 @@ class MainWindow(QMainWindow):
         })
         self.current_project = self.store.update_project(updated["id"], updated)
         self.status_label.setText("角色设置已保存到本地项目目录。")
+
+    def _import_model(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择3D模型",
+            "",
+            "3D模型 (*.glb *.gltf *.obj *.stl *.ply);;所有文件 (*.*)",
+        )
+        if not file_path:
+            return
+        try:
+            mesh = load_model_mesh(file_path)
+            self.preview.load_mesh(mesh, file_path)
+            if self.current_project:
+                updated = dict(self.current_project)
+                updated.setdefault("assets", {})["model"] = str(Path(file_path).resolve())
+                self.current_project = self.store.update_project(updated["id"], updated)
+            self.status_label.setText(f"模型加载成功：{Path(file_path).name}")
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "模型导入失败",
+                f"无法加载该模型。请确认文件完整且格式受支持。\n\n错误信息：{exc}"
+            )
 
     def _delete_project(self):
         if not self.current_project:
